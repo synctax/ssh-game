@@ -1,0 +1,47 @@
+# https://taskfile.dev
+
+version: '3'
+
+
+tasks:
+  build:
+    aliases:
+      - b
+    generates:
+      - bin/release
+    sources:
+      - ./src/**/*.odin
+    cmds:
+      - sudo odin build src -out:bin/release
+    silent: true
+
+  run:
+    deps:
+      - build
+    aliases:
+      - r
+    cmds:
+      - sudo bin/release
+    method: none
+    silent: true
+
+  build_debug:
+    aliases:
+      - bd
+    generates:
+      - bin/debug
+    sources:
+      - ./src/**/*.odin
+    cmds:
+      - sudo odin build src -out=bin/debug  -debug
+    silent: true
+
+  debug:
+    deps:
+      - build_debug
+    cmds:
+      - sudo lldb bin/debug
+    aliases:
+      - d
+    method: none
+    silent: true
