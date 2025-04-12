@@ -11,7 +11,7 @@ COOKIE_SIZE :: 16
 
 SERVER_PROTO_VERSION_STRING: string : "SSH-2.0-billsSSH_3.6.3q3"
 
-SUPPORTED_KEX_ALGORITHMS :: []string{"diffie-hellman-group14-sha256"}
+SUPPORTED_KEX_ALGORITHMS :: []string{DIFFIE_HELLMAN_NAME}
 SUPPORTED_HOST_KEY_ALGORITHMS :: []string{"rsa-sha2-256"}
 SUPPORTED_ENCRYPTION_ALGORITHMS :: []string{"aes128-ctr"}
 SUPPORTED_MAC_ALGORITHMS :: []string{"hmac-sha1"}
@@ -56,10 +56,38 @@ SSH_Connection_State :: struct {
 	compression_algorithm: string,
 }
 
+SSH_Algo_List :: struct {
+	kex:             []string,
+	host_key:        []string,
+	encryption_cts:  []string,
+	encryption_stc:  []string,
+	mac_cts:         []string,
+	mac_stc:         []string,
+	compression_cts: []string,
+	compression_stc: []string,
+}
+
+algo_list_clear :: proc(using list: ^SSH_Algo_List) {
+	delete(kex)
+	delete(host_key)
+	delete(encryption_cts)
+	delete(encryption_stc)
+	delete(mac_cts)
+	delete(mac_stc)
+	delete(compression_cts)
+	delete(compression_stc)
+}
+
 @(private)
 _write_u32 :: #force_inline proc(b: []u8, offset: int, val: u32) -> (new_offset: int) {
 	endian.put_u32(b[offset:], .Big, val)
 	return offset + 4
+}
+
+@(private)
+_read_u32 :: #force_inline proc(b: []u8, offset: int) -> (out: u32, new_offset: int, ok: bool) {
+	out = endian.get_u32(b[offset:offset + 4], .Big) or_return
+	return out, offset + 4, true
 }
 
 @(private)
@@ -75,6 +103,18 @@ _write_name_list :: proc(b: []u8, offset: int, list: []string) -> (new_offset: i
 	name_list := strings.join(list, ",")
 	defer delete(name_list)
 	return _write_string(b, offset, name_list)
+}
+
+@(private)
+_read_name_list :: proc(b: []u8, offset: int) -> (list: []string, new_offset: int, ok: bool) {
+	length, off, success := _read_u32(b, offset)
+	if len(b) < int(length) + 4 {
+		return nil, 0, false
+	}
+	list_string := transmute(string)b[off:off + int(length)]
+	list = strings.split(list_string, ",")
+
+	return list, offset + int(length) + 4, true
 }
 
 @(private)
@@ -101,9 +141,6 @@ _write_packet :: proc(state: ^SSH_Connection_State, payload: []u8) -> (err: net.
 
 	_ = rand.read(buffer[offset:offset + padding_len])
 	offset += padding_len
-
-	fmt.printfln("Actual packet size: %s", offset)
-	fmt.printfln("Sending packet of size %d and payload %s", packet_len, transmute(string)payload)
 
 	_, send_err := net.send_tcp(state.socket, buffer[:offset])
 	return send_err
@@ -137,8 +174,61 @@ _read_packet :: proc(
 	payload_size := packet_size - padding_size - 1
 	payload = state.read_buffer[:payload_size]
 
-	fmt.printfln("Successfully read packet of type %d and length %u", type, payload_size)
 	return type, payload, nil
+}
+
+@(private)
+_parse_algos :: proc(out: ^SSH_Algo_List, payload: []u8) -> (ok: bool) {
+	payload_len := len(payload)
+	if payload_len < 21 {
+		return false
+	}
+
+	right_bound := payload_len - 5
+	namelists := payload[16:right_bound]
+
+	off := 0
+	out.kex, off = _read_name_list(namelists, off) or_return
+	out.host_key, off = _read_name_list(namelists, off) or_return
+	out.encryption_cts, off = _read_name_list(namelists, off) or_return
+	out.encryption_stc, off = _read_name_list(namelists, off) or_return
+	out.mac_cts, off = _read_name_list(namelists, off) or_return
+	out.mac_stc, off = _read_name_list(namelists, off) or_return
+	out.compression_cts, off = _read_name_list(namelists, off) or_return
+	out.compression_stc, off = _read_name_list(namelists, off) or_return
+
+	return true
+}
+
+@(private)
+_find_consensus :: proc(a: []string, b: []string) -> (found: string, ok: bool) {
+	for a_name in a {
+		for b_name in b {
+			if strings.compare(a_name, b_name) == 0 {
+				return a_name, true
+			}
+		}
+	}
+	return "", false
+}
+
+@(private)
+_set_algos :: proc(state: ^SSH_Connection_State, algos: ^SSH_Algo_List) -> (ok: bool) {
+	kexname := _find_consensus(SUPPORTED_KEX_ALGORITHMS, algos.kex) or_return
+	hostname := _find_consensus(SUPPORTED_HOST_KEY_ALGORITHMS, algos.host_key) or_return
+	encryptionname := _find_consensus(
+		SUPPORTED_ENCRYPTION_ALGORITHMS,
+		algos.encryption_cts,
+	) or_return
+	macname := _find_consensus(SUPPORTED_MAC_ALGORITHMS, algos.mac_cts) or_return
+	compname := _find_consensus(SUPPORTED_COMP_ALGORITHMS, algos.compression_cts) or_return
+
+	state.kex_algorithm = kexname
+	state.host_key_algorithm = hostname
+	state.encryption_algorithm = encryptionname
+	state.mac_algorithm = macname
+	state.compression_algorithm = compname
+	return true
 }
 
 ssh_handle_connection :: proc(socket: net.TCP_Socket) -> (err: SSH_Error) {
@@ -228,8 +318,17 @@ ssh_handle_connection :: proc(socket: net.TCP_Socket) -> (err: SSH_Error) {
 			}
 			fmt.println("Recieved kex_init payload: ", transmute(string)payload)
 			state.state = .DISCONNECTED
-		// TODO: parse KEX_INIT
+			// TODO: parse KEX_INIT and actually reach concensus
 
+			client_algos: SSH_Algo_List
+			defer algo_list_clear(&client_algos)
+
+			parse_err := _parse_algos(&client_algos, payload)
+			if parse_err {
+				fmt.println("failed to parse client algo list")
+			}
+
+			_set_algos(&state, &client_algos)
 
 		case .DISCONNECTED:
 			break main_loop
