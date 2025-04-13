@@ -49,11 +49,20 @@ SSH_Connection_State :: struct {
 	state:                 SSH_State,
 	read_buffer:           [MAX_PACKET_SIZE]u8,
 	write_buffer:          [MAX_PACKET_SIZE]u8,
-	kex_algorithm:         string,
-	host_key_algorithm:    string,
-	encryption_algorithm:  string,
-	mac_algorithm:         string,
-	compression_algorithm: string,
+	kex_algorithm:         ^KEX_Algorithm,
+	host_key_algorithm:    ^Host_Key_Algorithm,
+	encryption_algorithm:  ^Cipher_Algorithm,
+	mac_algorithm:         ^MAC_Algorithm,
+	compression_algorithm: ^Compression_Algorithm,
+}
+
+connection_state_clear_algorithms :: proc(using conn_state: ^SSH_Connection_State) {
+	// TODO: most of these are required and should not be null, but we must check while impl is in progress
+	if kex_algorithm != nil {kex_algorithm->destroy()}
+	if host_key_algorithm != nil {host_key_algorithm->destroy()}
+	if encryption_algorithm != nil {encryption_algorithm->destroy()}
+	if mac_algorithm != nil {mac_algorithm->destroy()}
+	if compression_algorithm != nil {compression_algorithm->destroy()}
 }
 
 SSH_Algo_List :: struct {
@@ -223,11 +232,18 @@ _set_algos :: proc(state: ^SSH_Connection_State, algos: ^SSH_Algo_List) -> (ok: 
 	macname := _find_consensus(SUPPORTED_MAC_ALGORITHMS, algos.mac_cts) or_return
 	compname := _find_consensus(SUPPORTED_COMP_ALGORITHMS, algos.compression_cts) or_return
 
-	state.kex_algorithm = kexname
-	state.host_key_algorithm = hostname
-	state.encryption_algorithm = encryptionname
-	state.mac_algorithm = macname
-	state.compression_algorithm = compname
+	err: Algorithm_Create_Error
+	state.kex_algorithm, err = create_kex_algorithm(kexname)
+	state.host_key_algorithm, err = create_host_key_algorithm(hostname)
+	state.encryption_algorithm, err = create_cipher_algorithm(encryptionname)
+	state.mac_algorithm, err = create_mac_algorithm(macname)
+	state.compression_algorithm, err = create_compression_algorithm(compname)
+
+	if err != nil {
+		fmt.printfln("failed to construct one or more algorithms: %s", err)
+		return false
+	}
+
 	return true
 }
 
@@ -238,6 +254,7 @@ ssh_handle_connection :: proc(socket: net.TCP_Socket) -> (err: SSH_Error) {
 		socket = socket,
 		state  = .PROTO_VERSION_EXCHANGE,
 	}
+	defer connection_state_clear_algorithms(&state)
 
 	main_loop: for state.state != .DISCONNECTED {
 		switch state.state {
@@ -323,8 +340,8 @@ ssh_handle_connection :: proc(socket: net.TCP_Socket) -> (err: SSH_Error) {
 			client_algos: SSH_Algo_List
 			defer algo_list_clear(&client_algos)
 
-			parse_err := _parse_algos(&client_algos, payload)
-			if parse_err {
+			parse_ok := _parse_algos(&client_algos, payload)
+			if !parse_ok {
 				fmt.println("failed to parse client algo list")
 			}
 
