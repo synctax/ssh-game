@@ -233,11 +233,11 @@ _set_algos :: proc(state: ^SSH_Connection_State, algos: ^SSH_Algo_List) -> (ok: 
 	compname := _find_consensus(SUPPORTED_COMP_ALGORITHMS, algos.compression_cts) or_return
 
 	err: Algorithm_Create_Error
-	state.kex_algorithm, err = create_kex_algorithm(kexname)
-	state.host_key_algorithm, err = create_host_key_algorithm(hostname)
-	state.encryption_algorithm, err = create_cipher_algorithm(encryptionname)
-	state.mac_algorithm, err = create_mac_algorithm(macname)
-	state.compression_algorithm, err = create_compression_algorithm(compname)
+	state.kex_algorithm, err = create_algorithm(KEX_Algorithm, kexname)
+	state.host_key_algorithm, err = create_algorithm(Host_Key_Algorithm, hostname)
+	state.encryption_algorithm, err = create_algorithm(Cipher_Algorithm, encryptionname)
+	state.mac_algorithm, err = create_algorithm(MAC_Algorithm, macname)
+	state.compression_algorithm, err = create_algorithm(Compression_Algorithm, compname)
 
 	if err != nil {
 		fmt.printfln("failed to construct one or more algorithms: %s", err)
@@ -335,7 +335,6 @@ ssh_handle_connection :: proc(socket: net.TCP_Socket) -> (err: SSH_Error) {
 			}
 			fmt.println("Recieved kex_init payload: ", transmute(string)payload)
 			state.state = .DISCONNECTED
-			// TODO: parse KEX_INIT and actually reach concensus
 
 			client_algos: SSH_Algo_List
 			defer algo_list_clear(&client_algos)
@@ -344,9 +343,8 @@ ssh_handle_connection :: proc(socket: net.TCP_Socket) -> (err: SSH_Error) {
 			if !parse_ok {
 				fmt.println("failed to parse client algo list")
 			}
-
 			_set_algos(&state, &client_algos)
-
+			state.kex_algorithm->create_key_exchange()
 		case .DISCONNECTED:
 			break main_loop
 		}

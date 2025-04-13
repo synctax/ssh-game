@@ -1,9 +1,30 @@
+#+feature dynamic-literals
+
 package main
 
 import "core:fmt"
 import "core:mem"
+import "core:strings"
+
+algorithm_registry := map[string]Registry_Entry {
+	DIFFIE_HELLMAN_NAME = Registry_Entry {
+		constructor = diffie_hellman_create,
+		base_type = KEX_Algorithm,
+	},
+}
+
+Algorithm_Constructor :: proc(_: mem.Allocator) -> (instance: rawptr, err: _Alloc_Err)
+
+@(private)
+_Alloc_Err :: mem.Allocator_Error
+
+Registry_Entry :: struct {
+	constructor: Algorithm_Constructor,
+	base_type:   typeid,
+}
 
 Algorithm_Create_Error :: enum {
+	TYPE_MISMATCH,
 	NAME_NOT_FOUND,
 	FAILED_TO_ALLOCATE,
 }
@@ -49,20 +70,19 @@ Compression_Algorithm :: struct {
 	decompress: proc(this: Compression_Algorithm, data: []u8) -> []u8,
 }
 
+
 DIFFIE_HELLMAN_NAME :: "diffie-hellman-group14-sha256"
 Diffie_Hellman :: struct {
 	using _: KEX_Algorithm,
 }
 
-diffie_hellman_create :: proc(
-	allocator := context.allocator,
-) -> (
-	dh: ^Diffie_Hellman,
-	err: mem.Allocator_Error,
-) #optional_allocator_error {
+// Sort of gross to return rawptr here but Odin doesnt like closures
+diffie_hellman_create :: proc(allocator: mem.Allocator) -> (dh: rawptr, err: _Alloc_Err) {
 
-	create_key_exchange :: proc(this: ^KEX_Algorithm) -> []u8 {
-		return make_slice([]u8, 0)
+	create_key_exchange :: proc(t: ^KEX_Algorithm) -> []u8 {
+		this := transmute(^Diffie_Hellman)t
+		fmt.println("we dispatchin")
+		return nil
 	}
 
 	decrypt_key_exchange :: proc(this: ^KEX_Algorithm, ex: []u8) -> []u8 {
@@ -77,101 +97,54 @@ diffie_hellman_create :: proc(
 		free(this)
 	}
 
-	alloc_err: mem.Allocator_Error
-	dh, alloc_err = new(Diffie_Hellman, allocator)
-	if alloc_err != nil {
+	_dh, alloc_err := new(Diffie_Hellman, allocator)
+	if alloc_err != .None {
 		return nil, alloc_err
 	}
 
-	dh.name = DIFFIE_HELLMAN_NAME
-	dh.create_key_exchange = create_key_exchange
-	dh.decrypt_key_exchange = decrypt_key_exchange
-	dh.compute_hash = compute_hash
-	dh.destroy = destroy
+	_dh.name = DIFFIE_HELLMAN_NAME
+	_dh.create_key_exchange = create_key_exchange
+	_dh.decrypt_key_exchange = decrypt_key_exchange
+	_dh.compute_hash = compute_hash
+	_dh.destroy = destroy
 
-	return dh, nil
+	return (rawptr)(_dh), nil
 }
 
-create_kex_algorithm :: proc(
+create_algorithm :: proc(
+	$T: typeid,
 	name: string,
 	allocator := context.allocator,
 ) -> (
-	algo: ^KEX_Algorithm,
+	instance: ^T,
 	err: Algorithm_Create_Error,
 ) {
-	switch name {
-	case DIFFIE_HELLMAN_NAME:
-		algo, err =
-			diffie_hellman_create(allocator) or_else nil, Algorithm_Create_Error.FAILED_TO_ALLOCATE
+
+	if strings.compare("none", name) == 0 {
+		return nil, nil
 	}
 
-	return algo, err
-}
-
-create_host_key_algorithm :: proc(
-	name: string,
-	allocator := context.allocator,
-) -> (
-	algo: ^Host_Key_Algorithm,
-	err: Algorithm_Create_Error,
-) {
-	switch name {
-	case "none":
-		algo, err = nil, nil
-	case:
-		algo, err = nil, Algorithm_Create_Error.NAME_NOT_FOUND
+	entry, exists := algorithm_registry[name]
+	if !exists {
+		fmt.printfln("No matching algorithm '%s' in registry", name)
+		return nil, .NAME_NOT_FOUND
 	}
 
-	return algo, err
-}
-
-create_cipher_algorithm :: proc(
-	name: string,
-	allocator := context.allocator,
-) -> (
-	algo: ^Cipher_Algorithm,
-	err: Algorithm_Create_Error,
-) {
-	switch name {
-	case "none":
-		algo, err = nil, nil
-	case:
-		algo, err = nil, Algorithm_Create_Error.NAME_NOT_FOUND
+	if entry.base_type != T {
+		fmt.printfln(
+			"Algorithm type in registry did not match request. In registry: '%s'. Expected: '%s'",
+			entry.base_type,
+			typeid_of(T),
+		)
+		return nil, .TYPE_MISMATCH
 	}
 
-	return algo, err
-}
-
-create_mac_algorithm :: proc(
-	name: string,
-	allocator := context.allocator,
-) -> (
-	algo: ^MAC_Algorithm,
-	err: Algorithm_Create_Error,
-) {
-	switch name {
-	case "none":
-		algo, err = nil, nil
-	case:
-		algo, err = nil, Algorithm_Create_Error.NAME_NOT_FOUND
+	raw_instance, con_err := entry.constructor(allocator)
+	if raw_instance == nil || con_err != .None {
+		fmt.printfln("Failed to allocate algorithm with name: %s. Error: %s", name, con_err)
+		return nil, .FAILED_TO_ALLOCATE
 	}
 
-	return algo, err
-}
-
-create_compression_algorithm :: proc(
-	name: string,
-	allocator := context.allocator,
-) -> (
-	algo: ^Compression_Algorithm,
-	err: Algorithm_Create_Error,
-) {
-	switch name {
-	case "none":
-		algo, err = nil, nil
-	case:
-		algo, err = nil, Algorithm_Create_Error.NAME_NOT_FOUND
-	}
-
-	return algo, err
+	algorithm := (^T)(raw_instance)
+	return algorithm, nil
 }
